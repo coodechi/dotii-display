@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "generated_at_epoch": 0,
+  "preview_data": false,
+  "source": "seed",
+  "date": {
+    "lunar_text": ""
+  },
+  "weather": {
+    "enabled": false,
+    "available": false,
+    "fetched_at_epoch": 0,
+    "city": "",
+    "condition_code": 0,
+    "temperature_c": 0,
+    "temp_low_c": 0,
+    "temp_high_c": 0,
+    "humidity_percent": 0,
+    "wind_kph": 0
+  }
+}
