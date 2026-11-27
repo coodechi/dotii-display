@@ -1,6 +1,14 @@
 # 更新日志
 
-记录 2026-11-14 ~ 2026-11-22 围绕「深睡唤醒后页面回落 / 数据不更新」问题的修复，以及配套工具调整。按日期倒序。
+记录 2026-11-14 ~ 2026-11-27 围绕「深睡唤醒后页面回落 / 数据不更新」问题的修复、提示音适配及 CI 自动发布。按日期倒序。
+
+## 2026-11-27
+
+### GitHub Actions 自动构建与固件发布
+- 新增 `.github/workflows/firmware-release.yml`：push 到 main 自动构建 ESP-IDF 6.0.2 固件并发布到 GitHub Release。版本号取 `1.2.<run_number>` 自动递增，CI 临时改写 `CMakeLists.txt` 的 `PROJECT_VER` 使固件内嵌版本与 Release 一致；组装标准 4 文件烧录包（flasher_args.json + 3 个 bin），校验清单偏移、文件齐全与内嵌版本后打 zip 发布。macOS 现有 build-check 逻辑不变。
+- `.github/workflows/validate.yml`：删除对不存在的 `bridge/web/markdown.js` 的 `node --check`（CI 失败点）。
+- `bridge/tests/test_firmware_dependencies.py`：`managed_components/` 是 ESP-IDF 从 `dependencies.lock` 生成且被 gitignore，干净 checkout 下不存在；原测试读 `CHECKSUMS.json` 直接失败。改为组件缺失时 skipTest，存在时仍校验 zlib 头哈希。
+- 首次发布实测：`v1.2.2` / `dotii-firmware-1.2.2.zip`，两个 workflow 全绿。
 
 ## 2026-11-22
 
