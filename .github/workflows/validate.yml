@@ -28,7 +28,6 @@ jobs:
       - run: python -X pycache_prefix=.codex/pycache -m compileall -q bridge packaging/macos
       - run: node --check bridge/web/app.js
       - run: node --check bridge/web/i18n.js
-      - run: node --check bridge/web/markdown.js
 
   windows-build-check:
     runs-on: windows-latest

@@ -1,0 +1,117 @@
+name: Firmware Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  firmware-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          VERSION="1.2.${{ github.run_number }}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Release version: $VERSION"
+
+      - name: Set firmware version in CMakeLists.txt
+        run: |
+          python3 - "${{ steps.version.outputs.version }}" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          version = sys.argv[1]
+          path = pathlib.Path("CMakeLists.txt")
+          text = path.read_text()
+          updated = re.sub(
+              r'set\s*\(\s*PROJECT_VER\s+"[^"]+"\s*\)',
+              f'set(PROJECT_VER "{version}")',
+              text,
+              count=1,
+          )
+          if updated == text:
+              raise SystemExit("PROJECT_VER not found in CMakeLists.txt")
+          path.write_text(updated)
+          print(f"PROJECT_VER set to {version}")
+          PY
+
+      - name: Setup ESP-IDF
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch v6.0.2 https://github.com/espressif/esp-idf.git "$RUNNER_TEMP/esp-idf"
+          "$RUNNER_TEMP/esp-idf/install.sh" esp32s3
+          echo "IDF_PATH=$RUNNER_TEMP/esp-idf" >> "$GITHUB_ENV"
+
+      - name: Build firmware
+        run: |
+          source "$IDF_PATH/export.sh"
+          idf.py build
+
+      - name: Assemble and verify flashing bundle
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          STAGE="release-bundle"
+          mkdir -p "$STAGE/bootloader" "$STAGE/partition_table"
+          cp build/flasher_args.json "$STAGE/"
+          cp build/bootloader/bootloader.bin "$STAGE/bootloader/"
+          cp build/partition_table/partition-table.bin "$STAGE/partition_table/"
+          cp build/state_display.bin "$STAGE/"
+
+          python3 - "$STAGE" "$VERSION" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          stage = pathlib.Path(sys.argv[1])
+          version = sys.argv[2]
+          manifest = json.loads((stage / "flasher_args.json").read_text())
+          files = manifest.get("flash_files")
+          if not isinstance(files, dict) or not files:
+              raise SystemExit("flasher_args.json has no flash_files")
+          required = {"0x0", "0x8000", "0x10000"}
+          if not required <= set(files):
+              raise SystemExit(f"flash_files missing offsets: {required - set(files)}")
+
+          for offset, relative in files.items():
+              target = (stage / relative).resolve()
+              if not target.is_file() or not str(target).startswith(str(stage.resolve())):
+                  raise SystemExit(f"invalid flash file {relative!r} at {offset}")
+
+          image = (stage / "state_display.bin").read_bytes()
+          if len(image) < 80:
+              raise SystemExit("state_display.bin is truncated")
+          embedded = image[48:80].decode("utf-8", "replace").rstrip("\0")
+          if embedded != version:
+              raise SystemExit(f"firmware version {embedded!r} != expected {version!r}")
+
+          print("bundle verified:", ", ".join(f"{k}={v}" for k, v in files.items()))
+          print("embedded firmware version:", embedded)
+          PY
+
+          cd "$STAGE"
+          zip -r "../dotii-firmware-$VERSION.zip" .
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Dotii Firmware ${{ steps.version.outputs.version }}
+          body: |
+            Automated firmware build from commit `${{ github.sha }}`.
+
+            Version: `${{ steps.version.outputs.version }}`
+            ESP-IDF: `6.0.2` · Target: `esp32s3`
+
+            Flash with the Dotii management center using the bundled
+            `flasher_args.json` and the three images.
+          files: dotii-firmware-${{ steps.version.outputs.version }}.zip
+          generate_release_notes: true
