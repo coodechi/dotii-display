@@ -17,6 +17,7 @@
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "lvgl.h"
+#include "indev/lv_indev_private.h"
 #include "src/misc/cache/instance/lv_image_cache.h"
 #include "nvs.h"
 #include "sdkconfig.h"
@@ -414,6 +415,17 @@ static void activity_event(lv_event_t *event)
     } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
         s_wake_touch_in_progress = false;
     }
+}
+
+/* Child widgets do not bubble LV_EVENT_PRESSED to the screen by default, so the
+   screen-level handler records a stale press point whenever a swipe begins on a
+   label/button.  Capture the point at the indev layer where every touch passes. */
+static void touch_press_capture(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_PRESSED) return;
+    lv_indev_t *input = lv_indev_active();
+    if (input == NULL) return;
+    lv_indev_get_point(input, &s_press_point);
 }
 
 static void add_activity_event(lv_obj_t *screen)
@@ -1085,7 +1097,7 @@ static lv_obj_t *make_bambu_metric(lv_obj_t *parent, const char *caption, int x)
 /* Opening the detail page must be a deliberate tap. LVGL still reports
    LV_EVENT_CLICKED for short or diagonal drags that begin on this large
    central hot zone, which made page-swipes fall into the detail screen. */
-#define BAMBU_TAP_SLOP_PX 14
+#define BAMBU_TAP_SLOP_PX 20
 
 static void bambu_detail_clicked(lv_event_t *event)
 {
@@ -1928,16 +1940,18 @@ static void update_snapshot(const display_snapshot_t *snapshot)
         s_dotii_state_expression = snapshot->dotii_expression;
         s_dotii_state_started = lv_tick_get();
     }
-    const bambu_status_t previous_bambu_status = s_snapshot.bambu_status;
     s_snapshot = *snapshot;
-    /* 打印完成提示: announce the COMPLETED edge only. The first snapshot after
-       boot (including a cached restore) is state, not a fresh event. */
-    static bool s_bambu_status_primed;
-    if (!s_bambu_status_primed) {
-        s_bambu_status_primed = true;
-    } else if (snapshot->bambu_enabled && snapshot->bambu_status == BAMBU_STATUS_COMPLETED &&
-               previous_bambu_status != BAMBU_STATUS_COMPLETED &&
-               audio_chime_claim_print(bambu_job_key(snapshot))) {
+    /* 打印完成提示: the NVS job key is the single source of truth. A job that
+       finished while the device was asleep (deep sleep / power off) shows up
+       as COMPLETED in the first snapshot after wake, not as an edge, so
+       edge-only detection misses it. The key prevents replaying a job that was
+       already announced while still catching a newly finished one. An empty
+       filename with no timestamp is demo/placeholder data and is ignored. */
+    const bool job_identified = snapshot->bambu_filename[0] != '\0' ||
+                                snapshot->bambu_updated_at > 0;
+    if (snapshot->bambu_enabled && job_identified &&
+        snapshot->bambu_status == BAMBU_STATUS_COMPLETED &&
+        audio_chime_claim_print(bambu_job_key(snapshot))) {
         audio_chime_print_done();
     }
     /* The rotation angle is owned by the device (NVS) and kept upright
@@ -2139,7 +2153,11 @@ static void ui_timer(lv_timer_t *timer)
     (void)timer;
     ui_language_refresh();
     state_ui_set_power(s_battery, s_external_power, s_charging);
-    if (xQueueReceive(s_snapshot_queue, &s_snapshot, 0) == pdTRUE) update_snapshot(&s_snapshot);
+    /* Receive into a temporary: update_snapshot() compares the new payload
+       against the previous s_snapshot to detect edges (e.g. print completed).
+       Receiving directly into s_snapshot destroyed the old value first. */
+    display_snapshot_t incoming;
+    if (xQueueReceive(s_snapshot_queue, &incoming, 0) == pdTRUE) update_snapshot(&incoming);
 
     time_t now = time(NULL);
     struct tm local;
@@ -2214,6 +2232,17 @@ void state_ui_start(QueueHandle_t snapshot_queue)
     ESP_ERROR_CHECK(bsp_display_transform_set_angle(s_display_angle_tenths));
     s_ui_font = ui_font_fixed_20;
     s_ui_font.fallback = &ui_font_detail_20;
+    /* LVGL defaults (velocity>=3px per read, 50px total) are too strict for a
+       466 px round screen at 60 Hz: slow but deliberate swipes get their
+       gesture_sum reset every read and never fire.  Tune every pointer indev. */
+    for (lv_indev_t *input = lv_indev_get_next(NULL); input != NULL;
+         input = lv_indev_get_next(input)) {
+        if (lv_indev_get_type(input) != LV_INDEV_TYPE_POINTER) continue;
+        lv_indev_add_event_cb(input, touch_press_capture, LV_EVENT_PRESSED, NULL);
+        lv_indev_set_long_press_time(input, 500);
+        input->gesture_min_velocity = 1;
+        input->gesture_limit = 24;
+    }
     build_today();
     build_bambu();
     build_custom();

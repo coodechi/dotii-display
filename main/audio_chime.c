@@ -16,7 +16,7 @@
 #define TAG "audio_chime"
 
 #define CHIME_SAMPLE_RATE 16000
-#define CHIME_VOLUME_PERCENT 65
+#define CHIME_VOLUME_PERCENT 100
 #define CHIME_BLOCK_SAMPLES 256
 #define CHIME_FADE_SAMPLES (CHIME_SAMPLE_RATE * 8 / 1000)
 #define CHIME_QUEUE_LENGTH 4
@@ -40,16 +40,24 @@ typedef struct {
     uint16_t duration_ms;
 } chime_note_t;
 
+/* Hourly descending three-tone chime, moved into the 10 mm speaker's
+   720-1080 Hz resonance band and lengthened for audibility. Distinct from the
+   print-done rhythm by its descending pitch. */
 static const chime_note_t HOURLY_NOTES[] = {
-    {988.0f, 260},  /* B5 */
-    {784.0f, 260},  /* G5 */
-    {659.0f, 520},  /* E5 */
+    {1046.5f, 450}, /* C6 */
+    {880.0f, 450},  /* A5 */
+    {784.0f, 900},  /* G5, long finish */
 };
 
+/* "ding · ding —— ding~" rhythm at 1 kHz, the 10 mm speaker's resonance
+   peak. Pitch variation was inaudible on the small driver, so the print-done
+   chime is distinguished from the hourly descent by rhythm alone. */
 static const chime_note_t PRINT_DONE_NOTES[] = {
-    {1047.0f, 130}, /* C6 */
-    {1319.0f, 130}, /* E6 */
-    {1568.0f, 320}, /* G6 */
+    {1000.0f, 150},
+    {0.0f, 90},      /* pause */
+    {1000.0f, 150},
+    {0.0f, 90},      /* pause */
+    {1000.0f, 500},  /* long finish */
 };
 
 static esp_codec_dev_handle_t s_speaker;
@@ -93,6 +101,16 @@ static void chime_play(const chime_note_t *notes, size_t count)
         ESP_LOGW(TAG, "codec open failed");
         return;
     }
+    /* The default curve maps volume 100 to 0 dB, which leaves the ES8311 DAC
+       at only ~3.6 dB (hw_gain compensation). Boost the top so the 10 mm
+       speaker is audible: 100 -> +15 dB. Adding hw_gain compensation (~3.6 dB)
+       puts the DAC register near 228/255, still under the +32 dB ceiling. */
+    static const esp_codec_dev_vol_map_t vol_map[] = {
+        {0, -50.0f},
+        {100, 15.0f},
+    };
+    esp_codec_dev_vol_curve_t curve = {(esp_codec_dev_vol_map_t *)vol_map, 2};
+    esp_codec_dev_set_vol_curve(s_speaker, &curve);
     esp_codec_dev_set_out_vol(s_speaker, CHIME_VOLUME_PERCENT);
     static const chime_note_t pause = {0.0f, 70};
     for (size_t note = 0; note < count; ++note) {

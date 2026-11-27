@@ -4,10 +4,30 @@
 
 ## 2026-11-22
 
+### 扬声器提示音适配 10mm 喇叭
+- `main/audio_chime.c`：`CHIME_VOLUME_PERCENT` 65 → 100，打印完成音型从 880/1175Hz 改为全 1000Hz（150+150+500ms 三音节奏）。该 10mm 8Ω1W 喇叭规格 Fo=900Hz±20%、灵敏度 88dB，1kHz 落在共振峰内，偏离频率几乎听不到；靠节奏而非音高与整点报时（下行三音）区分。
+- `main/audio_chime.c`：整点报时从 988/784/659Hz 改为 1046.5/880/784Hz（全落在共振区，659Hz 原本低于 Fo 下限听不到），时长 260/260/520ms → 450/450/900ms，保持下行三音与完成音节奏区分。
+- 数字音量 100 仍偏小，追到根因：默认音量曲线把 100 映射为 0dB，扣掉 hw_gain(20·log10(3.3/5)≈−3.6dB) 后 ES8311 DAC 只开到 ~3.6dB（寄存器 ≈198/255）。用 `esp_codec_dev_set_vol_curve()` 把曲线上限提到 +15dB（加 hw_gain 补偿后寄存器 ≈228/255，仍在 +32dB 上限内），响度提升后两种提示音均可闻。
+- 实测 +9dB → +15dB、正弦波 → 方波均无实质提升：5V PA 推 8Ω 已接近 1W 饱和，软件增益到顶。方波音色更刺耳，已退回正弦波；+15dB 保留为最终值。要再响只能改硬件（16–20mm 高灵敏度喇叭或提高 PA 供电）。
+- 排障结论：音频硬件通道正常——开机无条件自检音（绕过快照/静音/去重）实测可闻。此前注入测试反复"没听到"的根因是测试脚本把设备时钟同步到 23:00–07:00 静音段，`chime_request()` 直接丢弃；改用白天时间注入后正常。
+- 排查经验：USB 注入 epoch 会改写设备本地时间（UTC epoch + 本地时区），验证提示音时必须避开静音时段（本地 23:00–07:00），且整点测试要换未去重的 hour 键，否则误判为硬件故障。
+
+### 触摸手势/点击灵敏度
+- `main/state_ui.c`：LVGL 默认 `gesture_min_velocity=3`、`gesture_limit=50` 在 466px 圆屏 60Hz 刷新下过于严格——慢速滑动时每帧位移不足 3px 会把 `gesture_sum` 清零，导致手势永远不触发。运行时遍历 pointer indev，将阈值降为 `gesture_min_velocity=1`、`gesture_limit=24`，长按时间放宽到 500ms。
+- `main/state_ui.c`：子控件默认不冒泡 `LV_EVENT_PRESSED` 到屏幕，`s_press_point` 常为旧值，导致顶部下滑/底部上滑的边缘判定失效。改为通过 `lv_indev_add_event_cb()` 在 indev 层捕获按下点。
+- `main/state_ui.c`：`BAMBU_TAP_SLOP_PX` 从 14 放宽到 20，减少手指微动导致的点击漏判。
+
 ### 管理中心服务改为常驻
 - `bridge/codex_bridge.py`：看门狗只锚定稳定的宿主进程（`VSCODE_PID` / `DOTII_HOST_PID`），不再扫描会自行重启的 IDE helper；宿主消失需连续 5 次检查（约 10 秒）才停服。新增 `--watch-pid`（追加监控）和 `--no-parent-watch`（关闭监控）。
 - 新增 macOS LaunchAgent `com.dotii.bridge.dev`：登录自启 + 每 120 秒自检，服务不在才拉起，已在运行则不重复启动。守护脚本位于 `~/Library/Application Support/Dotii/start_bridge_daemon.sh`（不能放在 `~/Downloads`，launchd 会被 macOS 隐私保护拦截）。
 - 背景：IDE 重启后旧宿主 PID 消失，看门狗停掉服务，设备离线后天气/拓竹一直显示缓存值。烧录脚本本身第一步就会停服务，不再依赖 IDE 生命周期管理。
+
+### 拓竹打印完成提示音不响
+- `main/state_ui.c`：`ui_timer` 原先把队列里的新快照直接收进全局 `s_snapshot`，导致 `update_snapshot()` 里 `previous_bambu_status` 读到的已经是新值，`COMPLETED` 边沿永远检测不到，完成提示音从未触发。改为收到独立临时变量后再更新 `s_snapshot`，保留旧值用于比对。
+- 排障过程：开机自检音能响，确认 codec / I2S / 功放正常；通过 USB 注入 `completed` 快照复现；根因与静音时段、NVS 去重键无关。
+- `main/audio_chime.c`：打印完成提示音改为「叮·叮——叮~」（880Hz 两短 + 停顿 + 1175Hz 长音），与整点报时（下行三音）和旧自检音（上行三音）明显区分。USB 注入完成事件实测可闻。
+- 休眠补报：完成提示改为以 NVS job 键（文件名 + 完成时间戳）为唯一依据，不再只认 `PRINTING → COMPLETED` 边沿。断电重启 / 深睡唤醒期间完成的打印，在醒来后的首帧快照即可提示；同一任务重发不会重复播放。
+- 整点报时实测：通过 USB 注入整点 epoch 触发 `ui_timer` 报时分支，确认醒着时整点报时可闻；深睡中的报时仍由 `schedule_hourly_wake()` 的 RTC 唤醒路径负责。
 
 ## 2026-11-15
 
