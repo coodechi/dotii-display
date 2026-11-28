@@ -18,7 +18,6 @@ idf_component_register(
         "generated/ui_font_clock.c"
         "generated/ui_font_temp.c"
         "generated/ui_icons.c"
-        "generated/voice_assets.c"
     INCLUDE_DIRS "." "generated"
     REQUIRES
         esp_driver_usb_serial_jtag

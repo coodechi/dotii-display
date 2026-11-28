@@ -136,9 +136,9 @@ void app_main(void)
            colliding with the LVGL timer's own minute-0 announcement. */
         const int32_t pending = board_input_take_pending_chime();
         if (pending >= 0 && audio_chime_claim_hour(pending)) audio_chime_hourly();
-        /* Playback is asynchronous; stay up just long enough to finish it,
-           then sleep again instead of idling for a full timeout window. */
-        vTaskDelay(pdMS_TO_TICKS(2500));
+        /* Playback is asynchronous; stay up for the full 3 s melody plus a
+           margin, then sleep instead of idling for a full timeout window. */
+        vTaskDelay(pdMS_TO_TICKS(3500));
         board_input_request_sleep();
     }
 }
