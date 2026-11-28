@@ -1,6 +1,5 @@
 #include "audio_chime.h"
 
-#include <math.h>
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
@@ -12,13 +11,13 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "nvs.h"
+#include "voice_assets.h"
 
 #define TAG "audio_chime"
 
 #define CHIME_SAMPLE_RATE 16000
 #define CHIME_VOLUME_PERCENT 100
 #define CHIME_BLOCK_SAMPLES 256
-#define CHIME_FADE_SAMPLES (CHIME_SAMPLE_RATE * 8 / 1000)
 #define CHIME_QUEUE_LENGTH 4
 #define CHIME_TASK_STACK 4096
 #define CHIME_TASK_PRIORITY 4
@@ -26,80 +25,27 @@
 #define CHIME_HOUR_KEY "hour"
 #define CHIME_JOB_KEY "job"
 
-#ifndef M_PI_F
-#define M_PI_F 3.14159265358979323846f
-#endif
-
 typedef enum {
     CHIME_HOURLY = 0,
     CHIME_PRINT_DONE,
 } chime_kind_t;
 
-typedef struct {
-    float frequency_hz; /* 0 renders silence */
-    uint16_t duration_ms;
-} chime_note_t;
-
-/* Hourly descending three-tone chime, moved into the 10 mm speaker's
-   720-1080 Hz resonance band and lengthened for audibility. Distinct from the
-   print-done rhythm by its descending pitch. */
-static const chime_note_t HOURLY_NOTES[] = {
-    {1046.5f, 450}, /* C6 */
-    {880.0f, 450},  /* A5 */
-    {784.0f, 900},  /* G5, long finish */
-};
-
-/* "ding · ding —— ding~" rhythm at 1 kHz, the 10 mm speaker's resonance
-   peak. Pitch variation was inaudible on the small driver, so the print-done
-   chime is distinguished from the hourly descent by rhythm alone. */
-static const chime_note_t PRINT_DONE_NOTES[] = {
-    {1000.0f, 150},
-    {0.0f, 90},      /* pause */
-    {1000.0f, 150},
-    {0.0f, 90},      /* pause */
-    {1000.0f, 500},  /* long finish */
-};
-
 static esp_codec_dev_handle_t s_speaker;
 static QueueHandle_t s_queue;
 static bool s_ready;
 
-static void chime_write_block(const chime_note_t *note, int offset, int count)
+/* Open the codec with the boosted curve shared by tones and voice. */
+static bool chime_open(void)
 {
-    static int16_t samples[CHIME_BLOCK_SAMPLES];
-    for (int index = 0; index < count; ++index) {
-        const int position = offset + index;
-        if (note->frequency_hz <= 0.0f) {
-            samples[index] = 0;
-            continue;
-        }
-        /* Attack/release ramp keeps every note click-free. */
-        const int attack = position < CHIME_FADE_SAMPLES ? position : CHIME_FADE_SAMPLES;
-        int release = (int)((uint32_t)note->duration_ms * CHIME_SAMPLE_RATE / 1000U) - position;
-        if (release > CHIME_FADE_SAMPLES) release = CHIME_FADE_SAMPLES;
-        if (release < 0) release = 0;
-        const int ramp = attack < release ? attack : release;
-        const float envelope = (float)ramp / (float)CHIME_FADE_SAMPLES;
-        const float phase = 2.0f * M_PI_F * note->frequency_hz * (float)position /
-                            (float)CHIME_SAMPLE_RATE;
-        const float amplitude = envelope * ((float)CHIME_VOLUME_PERCENT / 100.0f) * 32767.0f;
-        samples[index] = (int16_t)(sinf(phase) * amplitude);
-    }
-    esp_codec_dev_write(s_speaker, samples, count * (int)sizeof(int16_t));
-}
-
-static void chime_play(const chime_note_t *notes, size_t count)
-{
-    if (s_speaker == NULL) return;
+    if (s_speaker == NULL) return false;
     esp_codec_dev_sample_info_t info = {
         .bits_per_sample = 16,
         .channel = 1,
         .sample_rate = CHIME_SAMPLE_RATE,
     };
-    /* Open per notification: the codec and PA only draw current while audible. */
     if (esp_codec_dev_open(s_speaker, &info) != ESP_OK) {
         ESP_LOGW(TAG, "codec open failed");
-        return;
+        return false;
     }
     /* The default curve maps volume 100 to 0 dB, which leaves the ES8311 DAC
        at only ~3.6 dB (hw_gain compensation). Boost the top so the 10 mm
@@ -112,22 +58,20 @@ static void chime_play(const chime_note_t *notes, size_t count)
     esp_codec_dev_vol_curve_t curve = {(esp_codec_dev_vol_map_t *)vol_map, 2};
     esp_codec_dev_set_vol_curve(s_speaker, &curve);
     esp_codec_dev_set_out_vol(s_speaker, CHIME_VOLUME_PERCENT);
-    static const chime_note_t pause = {0.0f, 70};
-    for (size_t note = 0; note < count; ++note) {
-        const int total = (int)((uint32_t)notes[note].duration_ms * CHIME_SAMPLE_RATE / 1000U);
-        for (int offset = 0; offset < total; offset += CHIME_BLOCK_SAMPLES) {
-            int block = total - offset;
-            if (block > CHIME_BLOCK_SAMPLES) block = CHIME_BLOCK_SAMPLES;
-            chime_write_block(&notes[note], offset, block);
-        }
-        if (note + 1 < count) {
-            const int gap = (int)((uint32_t)pause.duration_ms * CHIME_SAMPLE_RATE / 1000U);
-            for (int offset = 0; offset < gap; offset += CHIME_BLOCK_SAMPLES) {
-                int block = gap - offset;
-                if (block > CHIME_BLOCK_SAMPLES) block = CHIME_BLOCK_SAMPLES;
-                chime_write_block(&pause, offset, block);
-            }
-        }
+    return true;
+}
+
+/* Stream a pre-generated 16 kHz / s16le / mono voice prompt. */
+static void voice_play(const int16_t *pcm, size_t samples)
+{
+    if (pcm == NULL || samples == 0) return;
+    if (!chime_open()) return;
+    static int16_t block[CHIME_BLOCK_SAMPLES];
+    for (size_t offset = 0; offset < samples; offset += CHIME_BLOCK_SAMPLES) {
+        size_t count = samples - offset;
+        if (count > CHIME_BLOCK_SAMPLES) count = CHIME_BLOCK_SAMPLES;
+        memcpy(block, pcm + offset, count * sizeof(int16_t));
+        esp_codec_dev_write(s_speaker, block, count * sizeof(int16_t));
     }
     esp_codec_dev_close(s_speaker);
 }
@@ -138,9 +82,40 @@ static void audio_task(void *argument)
     chime_kind_t kind;
     while (xQueueReceive(s_queue, &kind, portMAX_DELAY) == pdTRUE) {
         if (kind == CHIME_HOURLY) {
-            chime_play(HOURLY_NOTES, sizeof(HOURLY_NOTES) / sizeof(HOURLY_NOTES[0]));
+            time_t now = time(NULL);
+            struct tm local;
+            if (localtime_r(&now, &local) == NULL) continue;
+            const int hour = local.tm_hour;
+            if (hour < 0 || hour > 23) continue;
+            switch (hour) {
+                case 0:  voice_play(voice_hour_00, VOICE_HOUR_00_LEN); break;
+                case 1:  voice_play(voice_hour_01, VOICE_HOUR_01_LEN); break;
+                case 2:  voice_play(voice_hour_02, VOICE_HOUR_02_LEN); break;
+                case 3:  voice_play(voice_hour_03, VOICE_HOUR_03_LEN); break;
+                case 4:  voice_play(voice_hour_04, VOICE_HOUR_04_LEN); break;
+                case 5:  voice_play(voice_hour_05, VOICE_HOUR_05_LEN); break;
+                case 6:  voice_play(voice_hour_06, VOICE_HOUR_06_LEN); break;
+                case 7:  voice_play(voice_hour_07, VOICE_HOUR_07_LEN); break;
+                case 8:  voice_play(voice_hour_08, VOICE_HOUR_08_LEN); break;
+                case 9:  voice_play(voice_hour_09, VOICE_HOUR_09_LEN); break;
+                case 10: voice_play(voice_hour_10, VOICE_HOUR_10_LEN); break;
+                case 11: voice_play(voice_hour_11, VOICE_HOUR_11_LEN); break;
+                case 12: voice_play(voice_hour_12, VOICE_HOUR_12_LEN); break;
+                case 13: voice_play(voice_hour_13, VOICE_HOUR_13_LEN); break;
+                case 14: voice_play(voice_hour_14, VOICE_HOUR_14_LEN); break;
+                case 15: voice_play(voice_hour_15, VOICE_HOUR_15_LEN); break;
+                case 16: voice_play(voice_hour_16, VOICE_HOUR_16_LEN); break;
+                case 17: voice_play(voice_hour_17, VOICE_HOUR_17_LEN); break;
+                case 18: voice_play(voice_hour_18, VOICE_HOUR_18_LEN); break;
+                case 19: voice_play(voice_hour_19, VOICE_HOUR_19_LEN); break;
+                case 20: voice_play(voice_hour_20, VOICE_HOUR_20_LEN); break;
+                case 21: voice_play(voice_hour_21, VOICE_HOUR_21_LEN); break;
+                case 22: voice_play(voice_hour_22, VOICE_HOUR_22_LEN); break;
+                case 23: voice_play(voice_hour_23, VOICE_HOUR_23_LEN); break;
+                default: break;
+            }
         } else {
-            chime_play(PRINT_DONE_NOTES, sizeof(PRINT_DONE_NOTES) / sizeof(PRINT_DONE_NOTES[0]));
+            voice_play(voice_print_done, VOICE_PRINT_DONE_LEN);
         }
     }
 }
