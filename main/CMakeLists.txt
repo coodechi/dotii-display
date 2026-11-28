@@ -15,6 +15,8 @@ idf_component_register(
         "generated/ui_font_chinese_semibold_24.c"
         "generated/ui_font_bambu_semibold_24.c"
         "generated/ui_font_digits_64.c"
+        "generated/ui_font_clock.c"
+        "generated/ui_font_temp.c"
         "generated/ui_icons.c"
         "generated/voice_assets.c"
     INCLUDE_DIRS "." "generated"

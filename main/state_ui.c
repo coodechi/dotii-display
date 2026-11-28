@@ -26,6 +26,8 @@
 LV_FONT_DECLARE(ui_font_chinese_semibold_24);
 LV_FONT_DECLARE(ui_font_bambu_semibold_24);
 LV_FONT_DECLARE(ui_font_digits_64);
+LV_FONT_DECLARE(ui_font_clock);
+LV_FONT_DECLARE(ui_font_temp);
 LV_FONT_DECLARE(ui_font_detail_20);
 LV_FONT_DECLARE(ui_font_fixed_20);
 
@@ -976,12 +978,8 @@ static void apply_clock_style(void)
     lv_obj_set_style_arc_color(s_today_arc, color(arc_indicator), LV_PART_INDICATOR);
     if (arc_visible) lv_obj_remove_flag(s_today_arc, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(s_today_arc, LV_OBJ_FLAG_HIDDEN);
-    /* lv_style scale is 1/256, and the clock sits 86 px above the dial centre,
-       so its top corners are the first thing to leave the 466 px circle:
-       (50s)^2 + (86 + 16s)^2 <= 210^2 caps s near 3.2, i.e. scale ~800.
-       MINIMAL hides the ring, which buys a little extra room. */
-    lv_obj_set_style_transform_scale(s_today_time,
-                                     s_clock_style == DISPLAY_CLOCK_STYLE_MINIMAL ? 830 : 800, 0);
+    /* Clock uses a pre-rasterized 120 px font, so no runtime scaling is needed
+       (scaling a small bitmap font caused heavy jaggies). */
     lv_obj_set_style_text_color(s_today_time, color(accent), 0);
     lv_obj_set_style_text_color(s_today_temp, color(accent), 0);
 }
@@ -1016,7 +1014,7 @@ static void build_today(void)
     lv_obj_remove_style(s_today_arc, NULL, LV_PART_KNOB);
     lv_obj_remove_flag(s_today_arc, LV_OBJ_FLAG_CLICKABLE);
 
-    s_today_time = make_label(content, "--:--", &lv_font_montserrat_32, COLOR_TEXT);
+    s_today_time = make_label(content, "--:--", &ui_font_clock, COLOR_TEXT);
     lv_obj_set_style_transform_pivot_x(s_today_time, lv_pct(50), 0);
     lv_obj_set_style_transform_pivot_y(s_today_time, lv_pct(50), 0);
     lv_obj_align(s_today_time, LV_ALIGN_CENTER, 0, -86);
@@ -1035,8 +1033,7 @@ static void build_today(void)
     lv_obj_align(s_today_lunar, LV_ALIGN_CENTER, 0, 20);
     lv_obj_add_flag(s_today_lunar, LV_OBJ_FLAG_HIDDEN);
 
-    s_today_temp = make_label(content, "--", &lv_font_montserrat_32, COLOR_TEXT);
-    lv_obj_set_style_transform_scale(s_today_temp, 340, 0);
+    s_today_temp = make_label(content, "--", &ui_font_temp, COLOR_TEXT);
     lv_obj_set_style_transform_pivot_x(s_today_temp, lv_pct(50), 0);
     lv_obj_set_style_transform_pivot_y(s_today_temp, lv_pct(50), 0);
     lv_obj_align(s_today_temp, LV_ALIGN_CENTER, -118, 62);

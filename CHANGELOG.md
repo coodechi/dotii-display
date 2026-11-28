@@ -1,8 +1,13 @@
 # 更新日志
 
-记录 2026-11-14 ~ 2026-11-28 围绕「深睡唤醒后页面回落 / 数据不更新」问题的修复、提示音适配、语音播报及 CI 自动发布。按日期倒序。
+记录 2026-11-14 ~ 2026-11-28 围绕「深睡唤醒后页面回落 / 数据不更新」问题的修复、提示音适配、语音播报、字体锯齿修复及 CI 自动发布。按日期倒序。
 
 ## 2026-11-28
+
+### 修复时钟与温度字体锯齿及度数符号缺字
+- 新增 `main/generated/ui_font_clock.c` / `ui_font_temp.c`：用 `lv_font_conv` 从 Geneva.ttf 预生成位图字体（120px / 48px，4bpp，`--no-compress` 保持 `bitmap_format = 0`，与项目现有字体格式一致）。时钟用 120px 预渲染字体替代 `montserrat_32` + `transform_scale` 放大，消除大数字锯齿；温度用 48px 预渲染字体替代 32px + 340% 缩放，字符集包含 `°`（U+00B0），避免度数符号显示为矩形。
+- `main/state_ui.c`：移除时钟/温度的运行时 `transform_scale`，改用预渲染字体；`main/CMakeLists.txt` 将两个字体源文件加入编译。
+- 实测：时钟数字清晰无锯齿，温度度数符号显示正常。
 
 ### 整点报时与打印完成改为中文语音播报
 - 新增 `scripts/generate_voice_assets.py`：用 macOS `say -v Tingting` 生成 24 个整点（零点整～二十三点整）+「打印完成」，经 `afconvert` 转 16kHz/16bit 单声道 PCM，输出 C 数组到 `main/generated/voice_assets.c/.h`（25 段共 875KB）。重新生成只需在 macOS 跑该脚本。
